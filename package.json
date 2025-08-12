@@ -1,22 +1,47 @@
 {
   "name": "koishi-plugin-weibo-fetcher",
-  "description": "weibo",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "一个微博内容获取与订阅的 Koishi 插件，支持链接实时解析和用户后台订阅推送。",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
     "dist"
   ],
+  "author": "WhiteBr1ck (https://github.com/WhiteBr1ck)",
   "license": "MIT",
-  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WhiteBr1ck/koishi-plugin-weibo-fetcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WhiteBr1ck/koishi-plugin-weibo-fetcher/issues"
+  },
+  "homepage": "https://github.com/WhiteBr1ck/koishi-plugin-weibo-fetcher#readme",
   "keywords": [
-    "chatbot",
     "koishi",
-    "plugin"
+    "plugin",
+    "weibo",
+    "微博",
+    "fetcher",
+    "解析",
+    "订阅",
+    "推送",
+    "puppeteer"
   ],
-  "devDependencies": {},
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "koishi": "^4.18.7",
+    "koishi-plugin-puppeteer": "*"
+  },
+  "koishi": {
+    "description": {
+      "zh": "自动解析微博链接并返回截图及内容，支持用户订阅和推送功能。",
+    },
+    "service": {
+      "required": [
+        "database",
+        "puppeteer"
+      ]
+    }
   }
 }
