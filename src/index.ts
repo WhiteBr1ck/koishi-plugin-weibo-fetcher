@@ -20,6 +20,31 @@ declare module 'koishi' {
 
 const WEIBO_URL_REGEX = /https?:\/\/((m\.)?weibo\.(cn|com))\/(\d+)\/(\w+)/g
 
+function isInvalidRawUrl(rawUrl: string | null | undefined): boolean {
+  if (!rawUrl) return true
+  const value = rawUrl.trim().toLowerCase()
+  return !value
+    || value === 'false'
+    || value === 'true'
+    || value === 'null'
+    || value === 'undefined'
+    || value === '0'
+    || value === '#'
+    || value.startsWith('javascript:')
+    || value.startsWith('data:')
+}
+
+function normalizeWeiboUrl(rawUrl: string): string | null {
+  if (isInvalidRawUrl(rawUrl)) return null
+  try {
+    const normalizedRawUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl
+    const parsed = new URL(normalizedRawUrl, 'https://weibo.com')
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
 
 export type Config = BaseConfig & SubscriptionConfig
 
@@ -116,27 +141,43 @@ async function getLatestWeiboPostUrlByPuppeteer(ctx: Context, cookie: string, ui
     }
     await page.goto(userHomepageUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     
-    const articleSelector = 'article[class*="Feed_wrap"]';
+    const articleSelector = 'article';
     await page.waitForSelector(articleSelector, { timeout: 20000 });
     
-    const latestPostUrl = await page.evaluate(() => {
-      const articles = document.querySelectorAll('article[class*="Feed_wrap"]');
+    const latestPostUrl = await page.evaluate((targetUid) => {
+      const normalizePostUrl = (rawHref: string | null): string | null => {
+        if (!rawHref) return null;
+        try {
+          const normalizedRawHref = rawHref.startsWith('//') ? `https:${rawHref}` : rawHref;
+          const parsed = new URL(normalizedRawHref, 'https://weibo.com');
+          const match = parsed.pathname.match(/^\/(\d+)\/([A-Za-z0-9]+)/);
+          if (!match) return null;
+          if (match[1] !== targetUid) return null;
+          parsed.hash = '';
+          return parsed.toString();
+        } catch {
+          return null;
+        }
+      };
+
+      const articles = document.querySelectorAll('article');
       
       for (const article of articles) {
-        // --- 置顶标志选择器 ---
-        const pinnedElement = article.querySelector('[class*="title_title"]');
-        if (pinnedElement) {
+        const isPinned = Boolean(article.querySelector('img[src*="vip_top_default"]')) || (article.textContent?.includes('置顶') ?? false);
+        if (isPinned) {
           continue; 
         }
         
-        // --- 时间链接选择器 ---
-        const linkElement = article.querySelector('a[class*="head-info_time"]');
-        if (linkElement) {
-          return (linkElement as HTMLAnchorElement).href;
+        const linkElements = article.querySelectorAll<HTMLAnchorElement>('a[href]');
+        for (const linkElement of linkElements) {
+          const postUrl = normalizePostUrl(linkElement.getAttribute('href'));
+          if (postUrl) {
+            return postUrl;
+          }
         }
       }
       return null;
-    });
+    }, uid);
 
     if (latestPostUrl) {
       log(`成功获取到最新微博链接: ${latestPostUrl}`);
@@ -162,7 +203,6 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
 
   const page = await ctx.puppeteer.page();
   
-  // --- 返回一个包含文本和媒体块的对象 ---
   const result: { textBlock?: h; mediaBlocks: h[] } = {
     mediaBlocks: [],
   };
@@ -181,9 +221,45 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
       log('未配置 Cookie，将以游客身份尝试访问。', true);
     }
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    const articleSelector = 'article[class*="Feed_wrap"]';
+    const articleSelector = 'article';
     await page.waitForSelector(articleSelector, { timeout: 20000 });
-    const articleElement = await page.$(articleSelector);
+
+    const normalizedTargetUrl = normalizeWeiboUrl(url);
+    const articleHandle = await page.evaluateHandle((targetUrl) => {
+      const normalizePostUrl = (rawHref: string | null): string | null => {
+        if (!rawHref) return null;
+        try {
+          const normalizedRawHref = rawHref.startsWith('//') ? `https:${rawHref}` : rawHref;
+          const parsed = new URL(normalizedRawHref, 'https://weibo.com');
+          parsed.hash = '';
+          return parsed.toString();
+        } catch {
+          return null;
+        }
+      };
+
+      const articles = Array.from(document.querySelectorAll('article'));
+      if (!targetUrl) {
+        return articles.find(article => article.querySelector('.wbpro-feed-content')) || articles[0] || null;
+      }
+
+      const target = new URL(targetUrl);
+      const targetPath = target.pathname;
+
+      for (const article of articles) {
+        const links = article.querySelectorAll<HTMLAnchorElement>('a[href]');
+        for (const link of links) {
+          const normalizedLink = normalizePostUrl(link.getAttribute('href'));
+          if (!normalizedLink) continue;
+          if (new URL(normalizedLink).pathname === targetPath) {
+            return article;
+          }
+        }
+      }
+
+      return articles.find(article => article.querySelector('.wbpro-feed-content')) || articles[0] || null;
+    }, normalizedTargetUrl);
+    const articleElement = articleHandle.asElement();
     if (!articleElement) throw new Error('无法在页面上定位到微博正文元素 (<article>)。');
 
     if (options.showScreenshot) {
@@ -193,16 +269,90 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
       log('截图成功。');
     }
 
-    const postData = await articleElement.evaluate(article => {
+    const postData = await articleElement.evaluate((article: Element) => {
+      const articleEl = article as HTMLElement;
+      const normalizeAssetUrl = (rawUrl: string | null): string | null => {
+        if (!rawUrl) return null;
+        const lower = rawUrl.trim().toLowerCase();
+        if (!lower || lower === 'false' || lower === 'true' || lower === 'null' || lower === 'undefined' || lower === '0' || lower === '#') {
+          return null;
+        }
+        if (lower.startsWith('javascript:') || lower.startsWith('data:')) {
+          return null;
+        }
+        if (!rawUrl) return null;
+        try {
+          const normalizedRawUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl;
+          return new URL(normalizedRawUrl, 'https://weibo.com').toString();
+        } catch {
+          return null;
+        }
+      };
 
-      const author = article.querySelector('a[href^="/u/"] > span')?.textContent || '未知作者';
-      const textEl = article.querySelector('[class*="detail_text"]');
+      const authorSpan = articleEl.querySelector('a[href*="/u/"] span[title]') || articleEl.querySelector('a[href*="/u/"] span');
+      const author = authorSpan?.getAttribute('title') || authorSpan?.textContent || '未知作者';
+
+      const textEl = articleEl.querySelector('div[class*="_wbtext_"]')
+        || articleEl.querySelector('div[class*="wbtext"]')
+        || articleEl.querySelector('.wbpro-feed-content');
       const text = textEl ? (textEl as HTMLElement).innerText : '';
-      const images = Array.from(article.querySelectorAll<HTMLImageElement>('[class*="picture_pic"] img')).map(img => img.src);
-      const video = article.querySelector<HTMLVideoElement>('[class*="FeedPlayer"] video')?.src || null;
-      return { author, text, images, video };
+
+      const imageSet = new Set<string>();
+      const imageElements = articleEl.querySelectorAll<HTMLImageElement>('img.woo-picture-img, img[class*="focusImg"]');
+      for (const img of imageElements) {
+        const src = img.currentSrc || img.src || img.getAttribute('src');
+        const normalizedSrc = normalizeAssetUrl(src);
+        if (normalizedSrc) imageSet.add(normalizedSrc);
+      }
+      const images = Array.from(imageSet);
+
+      const videoCandidates = new Set<string>();
+      const addVideoCandidate = (rawUrl: string | null | undefined) => {
+        const normalized = normalizeAssetUrl(rawUrl || null);
+        if (!normalized) return;
+        if (/\.mp4(\?|$)/i.test(normalized) || /f\.video\.weibocdn\.com/i.test(normalized) || /g\.us\.sinaimg\.cn/i.test(normalized)) {
+          videoCandidates.add(normalized);
+        }
+      };
+
+      const videoElements = articleEl.querySelectorAll<HTMLVideoElement>('video');
+      for (const videoElement of videoElements) {
+        addVideoCandidate(videoElement.currentSrc);
+        addVideoCandidate(videoElement.src);
+        addVideoCandidate(videoElement.getAttribute('src'));
+        addVideoCandidate(videoElement.getAttribute('data-src'));
+        const sourceElements = videoElement.querySelectorAll<HTMLSourceElement>('source[src]');
+        for (const sourceElement of sourceElements) {
+          addVideoCandidate(sourceElement.getAttribute('src'));
+        }
+      }
+
+      const dataVideoElements = articleEl.querySelectorAll<HTMLElement>('[data-url], [data-src], a[href]');
+      for (const element of dataVideoElements) {
+        addVideoCandidate(element.getAttribute('data-url'));
+        addVideoCandidate(element.getAttribute('data-src'));
+        addVideoCandidate(element.getAttribute('href'));
+      }
+
+      const hasVideoWidget = Boolean(articleEl.querySelector('video, .video-js, [class*="feedVideo"]'));
+      const video = Array.from(videoCandidates)[0] || null;
+      const hasUnsupportedVideo = hasVideoWidget && !video;
+      return {
+        author,
+        text,
+        images,
+        video,
+        videoCandidates: Array.from(videoCandidates),
+        hasUnsupportedVideo,
+      };
     });
+
+    await articleHandle.dispose();
     log(`提取到来自 [${postData.author.trim()}] 的文本，${postData.images.length} 张图片，${postData.video ? 1 : 0} 个视频。`);
+    if (!postData.video && postData.videoCandidates?.length) {
+      log(`检测到 ${postData.videoCandidates.length} 个候选视频链接，但未找到可发送的 MP4 直链。`, true);
+      log(`候选链接: ${postData.videoCandidates.slice(0, 3).join(' | ')}`, true);
+    }
 
     let textContent = '';
     if (options.showLink) textContent += `${url}\n\n`;
@@ -210,6 +360,10 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
       const authorText = postData.author.trim();
       if (authorText && authorText !== '未知作者') textContent += `✨ 微博用户: ${authorText}\n\n`;
       if (postData.text) textContent += `💡 微博正文: ${postData.text}`;
+    }
+    if (postData.hasUnsupportedVideo) {
+      const notice = `⚠️ 该微博包含直播回放或非直链视频，暂时无法直接转发，请点击原链接观看。\n🔗 ${url}`;
+      textContent += textContent.trim() ? `\n\n${notice}` : notice;
     }
     if (textContent.trim()) {
       result.textBlock = h('p', textContent.trim());
@@ -227,7 +381,13 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
       if (postData.video) {
         try {
           const response = await ctx.http('get', postData.video, { headers: { 'Referer': 'https://weibo.com/' }, responseType: 'arraybuffer' });
-          result.mediaBlocks.push(h.video(response.data, response.headers.get('content-type')));
+          const contentType = response.headers.get('content-type') || '';
+          if (!/video\//i.test(contentType) && !/\.mp4(\?|$)/i.test(postData.video)) {
+            log(`检测到非直链视频资源，跳过发送: ${postData.video}`, true);
+          } else {
+            const safeContentType = /video\//i.test(contentType) ? contentType : 'video/mp4';
+            result.mediaBlocks.push(h.video(response.data, safeContentType));
+          }
         } catch (error) {
           log(`下载视频失败: ${postData.video}, 错误: ${error.message}`, true);
         }

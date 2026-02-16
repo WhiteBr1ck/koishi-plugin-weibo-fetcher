@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-weibo-fetcher",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "一个微博内容获取与订阅的 Koishi 插件，支持链接实时解析和用户后台订阅推送。",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
