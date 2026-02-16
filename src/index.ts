@@ -145,21 +145,6 @@ async function getLatestWeiboPostUrlByPuppeteer(ctx: Context, cookie: string, ui
     await page.waitForSelector(articleSelector, { timeout: 20000 });
     
     const latestPostUrl = await page.evaluate((targetUid) => {
-      const normalizePostUrl = (rawHref: string | null): string | null => {
-        if (!rawHref) return null;
-        try {
-          const normalizedRawHref = rawHref.startsWith('//') ? `https:${rawHref}` : rawHref;
-          const parsed = new URL(normalizedRawHref, 'https://weibo.com');
-          const match = parsed.pathname.match(/^\/(\d+)\/([A-Za-z0-9]+)/);
-          if (!match) return null;
-          if (match[1] !== targetUid) return null;
-          parsed.hash = '';
-          return parsed.toString();
-        } catch {
-          return null;
-        }
-      };
-
       const articles = document.querySelectorAll('article');
       
       for (const article of articles) {
@@ -170,7 +155,20 @@ async function getLatestWeiboPostUrlByPuppeteer(ctx: Context, cookie: string, ui
         
         const linkElements = article.querySelectorAll<HTMLAnchorElement>('a[href]');
         for (const linkElement of linkElements) {
-          const postUrl = normalizePostUrl(linkElement.getAttribute('href'));
+          const rawHref = linkElement.getAttribute('href');
+          if (!rawHref) continue;
+          let postUrl: string | null = null;
+          try {
+            const normalizedRawHref = rawHref.startsWith('//') ? `https:${rawHref}` : rawHref;
+            const parsed = new URL(normalizedRawHref, 'https://weibo.com');
+            const match = parsed.pathname.match(/^\/(\d+)\/([A-Za-z0-9]+)/);
+            if (!match) continue;
+            if (match[1] !== targetUid) continue;
+            parsed.hash = '';
+            postUrl = parsed.toString();
+          } catch {
+            postUrl = null;
+          }
           if (postUrl) {
             return postUrl;
           }
@@ -226,18 +224,6 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
 
     const normalizedTargetUrl = normalizeWeiboUrl(url);
     const articleHandle = await page.evaluateHandle((targetUrl) => {
-      const normalizePostUrl = (rawHref: string | null): string | null => {
-        if (!rawHref) return null;
-        try {
-          const normalizedRawHref = rawHref.startsWith('//') ? `https:${rawHref}` : rawHref;
-          const parsed = new URL(normalizedRawHref, 'https://weibo.com');
-          parsed.hash = '';
-          return parsed.toString();
-        } catch {
-          return null;
-        }
-      };
-
       const articles = Array.from(document.querySelectorAll('article'));
       if (!targetUrl) {
         return articles.find(article => article.querySelector('.wbpro-feed-content')) || articles[0] || null;
@@ -249,7 +235,17 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
       for (const article of articles) {
         const links = article.querySelectorAll<HTMLAnchorElement>('a[href]');
         for (const link of links) {
-          const normalizedLink = normalizePostUrl(link.getAttribute('href'));
+          const rawHref = link.getAttribute('href');
+          if (!rawHref) continue;
+          let normalizedLink: string | null = null;
+          try {
+            const normalizedRawHref = rawHref.startsWith('//') ? `https:${rawHref}` : rawHref;
+            const parsed = new URL(normalizedRawHref, 'https://weibo.com');
+            parsed.hash = '';
+            normalizedLink = parsed.toString();
+          } catch {
+            normalizedLink = null;
+          }
           if (!normalizedLink) continue;
           if (new URL(normalizedLink).pathname === targetPath) {
             return article;
@@ -271,23 +267,6 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
 
     const postData = await articleElement.evaluate((article: Element) => {
       const articleEl = article as HTMLElement;
-      const normalizeAssetUrl = (rawUrl: string | null): string | null => {
-        if (!rawUrl) return null;
-        const lower = rawUrl.trim().toLowerCase();
-        if (!lower || lower === 'false' || lower === 'true' || lower === 'null' || lower === 'undefined' || lower === '0' || lower === '#') {
-          return null;
-        }
-        if (lower.startsWith('javascript:') || lower.startsWith('data:')) {
-          return null;
-        }
-        if (!rawUrl) return null;
-        try {
-          const normalizedRawUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl;
-          return new URL(normalizedRawUrl, 'https://weibo.com').toString();
-        } catch {
-          return null;
-        }
-      };
 
       const authorSpan = articleEl.querySelector('a[href*="/u/"] span[title]') || articleEl.querySelector('a[href*="/u/"] span');
       const author = authorSpan?.getAttribute('title') || authorSpan?.textContent || '未知作者';
@@ -301,37 +280,79 @@ async function processWeiboPost(ctx: Context, config: Config, url: string, optio
       const imageElements = articleEl.querySelectorAll<HTMLImageElement>('img.woo-picture-img, img[class*="focusImg"]');
       for (const img of imageElements) {
         const src = img.currentSrc || img.src || img.getAttribute('src');
-        const normalizedSrc = normalizeAssetUrl(src);
+        let normalizedSrc: string | null = null;
+        if (src) {
+          const lower = src.trim().toLowerCase();
+          if (lower && lower !== 'false' && lower !== 'true' && lower !== 'null' && lower !== 'undefined' && lower !== '0' && lower !== '#' && !lower.startsWith('javascript:') && !lower.startsWith('data:')) {
+            try {
+              const normalizedRawUrl = src.startsWith('//') ? `https:${src}` : src;
+              normalizedSrc = new URL(normalizedRawUrl, 'https://weibo.com').toString();
+            } catch {
+              normalizedSrc = null;
+            }
+          }
+        }
         if (normalizedSrc) imageSet.add(normalizedSrc);
       }
       const images = Array.from(imageSet);
 
       const videoCandidates = new Set<string>();
-      const addVideoCandidate = (rawUrl: string | null | undefined) => {
-        const normalized = normalizeAssetUrl(rawUrl || null);
-        if (!normalized) return;
-        if (/\.mp4(\?|$)/i.test(normalized) || /f\.video\.weibocdn\.com/i.test(normalized) || /g\.us\.sinaimg\.cn/i.test(normalized)) {
-          videoCandidates.add(normalized);
-        }
-      };
 
       const videoElements = articleEl.querySelectorAll<HTMLVideoElement>('video');
       for (const videoElement of videoElements) {
-        addVideoCandidate(videoElement.currentSrc);
-        addVideoCandidate(videoElement.src);
-        addVideoCandidate(videoElement.getAttribute('src'));
-        addVideoCandidate(videoElement.getAttribute('data-src'));
+        const rawUrls = [
+          videoElement.currentSrc,
+          videoElement.src,
+          videoElement.getAttribute('src'),
+          videoElement.getAttribute('data-src'),
+        ];
+        for (const rawUrl of rawUrls) {
+          if (!rawUrl) continue;
+          const lower = rawUrl.trim().toLowerCase();
+          if (!lower || lower === 'false' || lower === 'true' || lower === 'null' || lower === 'undefined' || lower === '0' || lower === '#' || lower.startsWith('javascript:') || lower.startsWith('data:')) continue;
+          try {
+            const normalizedRawUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl;
+            const normalized = new URL(normalizedRawUrl, 'https://weibo.com').toString();
+            if (/\.mp4(\?|$)/i.test(normalized) || /f\.video\.weibocdn\.com/i.test(normalized) || /g\.us\.sinaimg\.cn/i.test(normalized)) {
+              videoCandidates.add(normalized);
+            }
+          } catch {}
+        }
         const sourceElements = videoElement.querySelectorAll<HTMLSourceElement>('source[src]');
         for (const sourceElement of sourceElements) {
-          addVideoCandidate(sourceElement.getAttribute('src'));
+          const rawUrl = sourceElement.getAttribute('src');
+          if (!rawUrl) continue;
+          const lower = rawUrl.trim().toLowerCase();
+          if (!lower || lower === 'false' || lower === 'true' || lower === 'null' || lower === 'undefined' || lower === '0' || lower === '#' || lower.startsWith('javascript:') || lower.startsWith('data:')) continue;
+          try {
+            const normalizedRawUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl;
+            const normalized = new URL(normalizedRawUrl, 'https://weibo.com').toString();
+            if (/\.mp4(\?|$)/i.test(normalized) || /f\.video\.weibocdn\.com/i.test(normalized) || /g\.us\.sinaimg\.cn/i.test(normalized)) {
+              videoCandidates.add(normalized);
+            }
+          } catch {}
         }
       }
 
       const dataVideoElements = articleEl.querySelectorAll<HTMLElement>('[data-url], [data-src], a[href]');
       for (const element of dataVideoElements) {
-        addVideoCandidate(element.getAttribute('data-url'));
-        addVideoCandidate(element.getAttribute('data-src'));
-        addVideoCandidate(element.getAttribute('href'));
+        const rawUrls = [
+          element.getAttribute('data-url'),
+          element.getAttribute('data-src'),
+          element.getAttribute('href'),
+        ];
+        for (const rawUrl of rawUrls) {
+          if (!rawUrl) continue;
+          const lower = rawUrl.trim().toLowerCase();
+          if (!lower || lower === 'false' || lower === 'true' || lower === 'null' || lower === 'undefined' || lower === '0' || lower === '#' || lower.startsWith('javascript:') || lower.startsWith('data:')) continue;
+          try {
+            const normalizedRawUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl;
+            const normalized = new URL(normalizedRawUrl, 'https://weibo.com').toString();
+            if (/\.mp4(\?|$)/i.test(normalized) || /f\.video\.weibocdn\.com/i.test(normalized) || /g\.us\.sinaimg\.cn/i.test(normalized)) {
+              videoCandidates.add(normalized);
+            }
+          } catch {}
+        }
       }
 
       const hasVideoWidget = Boolean(articleEl.querySelector('video, .video-js, [class*="feedVideo"]'));
