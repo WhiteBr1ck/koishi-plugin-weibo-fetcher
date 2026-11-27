@@ -1,5 +1,5 @@
 import { Context, Schema, h, Logger, Time, Bot, sleep } from 'koishi'
-import Puppeteer from 'koishi-plugin-puppeteer'
+import type {} from 'koishi-plugin-puppeteer'
 
 export const name = 'koishi-plugin-weibo-fetcher'
 export const inject = {
